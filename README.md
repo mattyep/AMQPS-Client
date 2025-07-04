@@ -1,12 +1,12 @@
 # AMQPS Client
 
-This is a simple terminal UI application that connects to an AMQPS server using a client certificate in a PKCS#12 (.p12) file.
+This application provides a small graphical interface for connecting to an AMQPS server using mutual TLS authentication.
 
 ## Features
 
-- Input fields for the AMQPS URL, the path to a `.p12` file, and the password protecting that file.
-- Connect button that establishes an AMQPS connection using mutual TLS.
-- Displays whether the connection succeeded or if an error occurred.
+- Text fields for the AMQPS URL, path to a `.p12` client certificate, and its password
+- "Connect" button that attempts an mTLS connection using the `go-amqp` library
+- Connection result is displayed inside the window
 
 ## Building
 
@@ -16,11 +16,8 @@ go build
 
 ## Running
 
-Run the resulting binary or use `go run`:
-
 ```
 go run .
 ```
 
-You will be presented with a form to provide the AMQPS URL, path to the `.p12` file, and its password. After pressing **Connect** the application reports the result.
-
+A window will appear where you can enter the AMQPS server URL, the location of your `.p12` file and its password. Clicking **Connect** will attempt the connection and report success or any error.

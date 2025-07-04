@@ -5,36 +5,33 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io/ioutil"
-	"log"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 
 	"github.com/Azure/go-amqp"
-	"github.com/rivo/tview"
 	"golang.org/x/crypto/pkcs12"
 )
 
 func connect(url, p12Path, password string) error {
-	// Read the pkcs12 file
 	data, err := ioutil.ReadFile(p12Path)
 	if err != nil {
 		return fmt.Errorf("failed to read p12 file: %w", err)
 	}
-
-	// Decode p12 to get certificate and key
 	privKey, cert, err := pkcs12.Decode(data, password)
 	if err != nil {
 		return fmt.Errorf("failed to decode p12: %w", err)
 	}
-
 	tlsCert := tls.Certificate{
 		Certificate: [][]byte{cert.Raw},
 		PrivateKey:  privKey,
 	}
-
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 		MinVersion:   tls.VersionTLS12,
 	}
-
 	_, err = amqp.Dial(context.Background(), url, &amqp.ConnOptions{TLSConfig: tlsConfig})
 	if err != nil {
 		return err
@@ -43,34 +40,43 @@ func connect(url, p12Path, password string) error {
 }
 
 func main() {
-	app := tview.NewApplication()
-	form := tview.NewForm()
+	myApp := app.New()
+	w := myApp.NewWindow("AMQPS Client")
 
-	var url, p12Path, password string
+	urlEntry := widget.NewEntry()
+	urlEntry.SetPlaceHolder("amqps://hostname")
 
-	form.AddInputField("AMQPS URL", "", 40, nil, func(text string) { url = text })
-	form.AddInputField("P12 Path", "", 40, nil, func(text string) { p12Path = text })
-	form.AddPasswordField("P12 Password", "", 40, '*', func(text string) { password = text })
+	p12Entry := widget.NewEntry()
+	p12Entry.SetPlaceHolder("/path/to/client.p12")
 
-	status := tview.NewTextView().SetText("")
+	passEntry := widget.NewPasswordEntry()
 
-	form.AddButton("Connect", func() {
-		status.SetText("Connecting...")
-		if err := connect(url, p12Path, password); err != nil {
-			status.SetText(fmt.Sprintf("Connection failed: %v", err))
-		} else {
-			status.SetText("Connected successfully")
-		}
+	statusLabel := widget.NewLabel("")
+
+	connectBtn := widget.NewButton("Connect", func() {
+		statusLabel.SetText("Connecting...")
+		go func() {
+			err := connect(urlEntry.Text, p12Entry.Text, passEntry.Text)
+			if err != nil {
+				statusLabel.SetText(fmt.Sprintf("Connection failed: %v", err))
+			} else {
+				statusLabel.SetText("Connected successfully")
+			}
+		}()
 	})
-	form.AddButton("Quit", func() {
-		app.Stop()
-	})
 
-	flex := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(form, 0, 1, true).
-		AddItem(status, 1, 0, false)
+	form := container.NewVBox(
+		widget.NewForm(
+			widget.NewFormItem("AMQPS URL", urlEntry),
+			widget.NewFormItem("P12 Path", p12Entry),
+			widget.NewFormItem("P12 Password", passEntry),
+		),
+		connectBtn,
+		statusLabel,
+	)
 
-	if err := app.SetRoot(flex, true).Run(); err != nil {
-		log.Fatalf("error running application: %v", err)
-	}
+	w.SetContent(form)
+	w.Resize(fyne.NewSize(400, 200))
+
+	w.ShowAndRun()
 }
