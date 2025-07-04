@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/pem"
 	"fmt"
-	"io/ioutil"
+	"os"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -16,21 +17,26 @@ import (
 )
 
 func connect(url, p12Path, password string) error {
-	data, err := ioutil.ReadFile(p12Path)
+	data, err := os.ReadFile(p12Path)
 	if err != nil {
 		return fmt.Errorf("failed to read p12 file: %w", err)
 	}
-	privKey, cert, err := pkcs12.Decode(data, password)
+	blocks, err := pkcs12.ToPEM(data, password)
 	if err != nil {
 		return fmt.Errorf("failed to decode p12: %w", err)
 	}
-	tlsCert := tls.Certificate{
-		Certificate: [][]byte{cert.Raw},
-		PrivateKey:  privKey,
+	var pemData []byte
+	for _, b := range blocks {
+		pemData = append(pemData, pem.EncodeToMemory(b)...)
+	}
+	cert, err := tls.X509KeyPair(pemData, pemData)
+	if err != nil {
+		return fmt.Errorf("failed to parse key pair: %w", err)
 	}
 	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		MinVersion:   tls.VersionTLS12,
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{cert},
+		MinVersion:         tls.VersionTLS12,
 	}
 	_, err = amqp.Dial(context.Background(), url, &amqp.ConnOptions{TLSConfig: tlsConfig})
 	if err != nil {

@@ -7,6 +7,7 @@ This application provides a small graphical interface for connecting to an AMQPS
 - Text fields for the AMQPS URL, path to a `.p12` client certificate, and its password
 - "Connect" button that attempts an mTLS connection using the `go-amqp` library
 - Connection result is displayed inside the window
+- The `.p12` file is converted to PEM at runtime to load the certificate chain
 
 ## Building
 
