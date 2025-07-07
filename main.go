@@ -21,6 +21,8 @@ var conn *amqp.Conn
 var retrievedMsgs []*amqp.Message
 var receiver *amqp.Receiver
 
+// connect establishes an AMQP connection to the specified URL using SASL plain authentication with the provided username and password.
+// Returns the established connection or an error if the connection fails.
 func connect(url, username, password string) (*amqp.Conn, error) {
 	conn, err := amqp.Dial(context.Background(), url, &amqp.ConnOptions{
 		SASLType: amqp.SASLTypePlain(username, password),
@@ -31,6 +33,9 @@ func connect(url, username, password string) (*amqp.Conn, error) {
 	return conn, nil
 }
 
+// retrieveMessages receives a specified number of messages from the given AMQP queue and returns their formatted JSON representations.
+// It creates a new session and receiver, releases each message after retrieval, and appends the formatted messages to a slice.
+// Returns a slice of indented JSON strings for each message, or an error if retrieval fails.
 func retrieveMessages(ctx context.Context, conn *amqp.Conn, queueName string, nbMsg int) ([]string, error) {
 	sess, err := conn.NewSession(ctx, nil)
 	if err != nil {
@@ -70,6 +75,7 @@ func retrieveMessages(ctx context.Context, conn *amqp.Conn, queueName string, nb
 	return lines, nil
 }
 
+// createInputField returns a Fyne text entry widget initialized with the specified placeholder and initial text.
 func createInputField(placeholder, text string) *widget.Entry {
 	field := widget.NewEntry()
 	field.SetPlaceHolder(placeholder)
@@ -77,6 +83,7 @@ func createInputField(placeholder, text string) *widget.Entry {
 	return field
 }
 
+// topBar creates and returns a styled top bar container with the application name and a horizontal line for use in the GUI.
 func topBar() *fyne.Container {
 	appName := canvas.NewText("AMQP Client", color.White)
 	appName.TextStyle = fyne.TextStyle{Bold: true}
@@ -86,6 +93,9 @@ func topBar() *fyne.Container {
 	return top
 }
 
+// main initializes and runs the AMQP client GUI application.
+// It sets up the window, input fields for connection and queue parameters, status display, message list, and buttons for connecting and retrieving messages.
+// The function manages user interactions for connecting to an AMQP server and retrieving messages from a specified queue, displaying results in the GUI.
 func main() {
 	myApp := app.New()
 	w := myApp.NewWindow("AMQPS Client")
