@@ -2,110 +2,123 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/pem"
+	"encoding/json"
 	"fmt"
-	"os"
+	"image/color"
 	"strconv"
-	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/Azure/go-amqp"
-	"golang.org/x/crypto/pkcs12"
 )
 
 var conn *amqp.Conn
 var retrievedMsgs []*amqp.Message
+var receiver *amqp.Receiver
 
-func connect(url, p12Path, password string) (*amqp.Conn, error) {
-	data, err := os.ReadFile(p12Path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read p12 file: %w", err)
-	}
-	blocks, err := pkcs12.ToPEM(data, password)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode p12: %w", err)
-	}
-	var pemData []byte
-	for _, b := range blocks {
-		pemData = append(pemData, pem.EncodeToMemory(b)...)
-	}
-	cert, err := tls.X509KeyPair(pemData, pemData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse key pair: %w", err)
-	}
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
-		Certificates:       []tls.Certificate{cert},
-		MinVersion:         tls.VersionTLS12,
-	}
-	conn, err := amqp.Dial(context.Background(), url, &amqp.ConnOptions{TLSConfig: tlsConfig})
+func connect(url, username, password string) (*amqp.Conn, error) {
+	conn, err := amqp.Dial(context.Background(), url, &amqp.ConnOptions{
+		SASLType: amqp.SASLTypePlain(username, password),
+	})
 	if err != nil {
 		return nil, err
 	}
 	return conn, nil
 }
 
+func retrieveMessages(ctx context.Context, conn *amqp.Conn, queueName string, nbMsg int) ([]string, error) {
+	sess, err := conn.NewSession(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("session error: %v", err)
+	}
+	if receiver != nil {
+		receiver.Close(ctx)
+	}
+
+	receiver, err = sess.NewReceiver(
+		ctx,
+		queueName,
+		&amqp.ReceiverOptions{
+			Capabilities:       []string{"queue"},
+			SourceCapabilities: []string{"queue"},
+			Credit:             10000,
+		},
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("receiver error: %v", err)
+	}
+	var lines []string
+	for i := 0; i < nbMsg; i++ {
+		msg, err := receiver.Receive(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("receive failed: %v", err)
+		}
+
+		var mappedMsg map[string]any
+		_ = json.Unmarshal(msg.GetData(), &mappedMsg)
+		jsonIndent, _ := json.MarshalIndent(mappedMsg, "", "\t")
+		_ = receiver.ReleaseMessage(ctx, msg)
+		retrievedMsgs = append(retrievedMsgs, msg)
+		lines = append(lines, string(jsonIndent))
+	}
+	return lines, nil
+}
+
+func createInputField(placeholder, text string) *widget.Entry {
+	field := widget.NewEntry()
+	field.SetPlaceHolder(placeholder)
+	field.SetText(text)
+	return field
+}
+
+func topBar() *fyne.Container {
+	appName := canvas.NewText("AMQP Client", color.White)
+	appName.TextStyle = fyne.TextStyle{Bold: true}
+	line := canvas.NewLine(color.RGBA{255, 255, 255, 50})
+	line.StrokeWidth = 1
+	top := container.NewVBox(appName, line)
+	return top
+}
+
 func main() {
 	myApp := app.New()
 	w := myApp.NewWindow("AMQPS Client")
+	w.Resize(fyne.NewSize(1440, 900))
 
-	urlEntry := widget.NewEntry()
-	urlEntry.SetPlaceHolder("amqps://hostname")
-
-	p12Entry := widget.NewEntry()
-	p12Entry.SetPlaceHolder("/path/to/client.p12")
-
-	passEntry := widget.NewPasswordEntry()
-
+	urlField := createInputField("amqps://hostname", "amqp://localhost:5672")
+	usernameField := createInputField("username", "user")
+	passEntry := createInputField("password", "user")
 	statusLabel := widget.NewLabel("")
+	queueNameField := createInputField("queue name", "my_queue")
+	nbMsgField := createInputField("count", "10")
 
-	queueEntry := widget.NewEntry()
-	queueEntry.SetPlaceHolder("queue name")
+	data := binding.BindStringList(
+		&[]string{},
+	)
 
-	numEntry := widget.NewEntry()
-	numEntry.SetText("10")
-
-	msgDisplay := widget.NewMultiLineEntry()
-	msgDisplay.Disable()
-
-	ackBtn := widget.NewButton("Acknowledge all", func() {
-		go func() {
-			for _, m := range retrievedMsgs {
-				_ = m.Accept(context.Background())
-			}
-			retrievedMsgs = nil
-			msgDisplay.SetText("")
-		}()
-	})
-	ackBtn.Disable()
-
-	releaseBtn := widget.NewButton("Release all", func() {
-		go func() {
-			for _, m := range retrievedMsgs {
-				_ = m.Release(context.Background())
-			}
-			retrievedMsgs = nil
-			msgDisplay.SetText("")
-		}()
-	})
-	releaseBtn.Disable()
+	msgList := widget.NewListWithData(data,
+		func() fyne.CanvasObject {
+			return widget.NewLabel("template")
+		},
+		func(i binding.DataItem, o fyne.CanvasObject) {
+			o.(*widget.Label).Bind(i.(binding.String))
+		})
 
 	connectBtn := widget.NewButton("Connect", func() {
 		statusLabel.SetText("Connecting...")
 		go func() {
 			var err error
-			conn, err = connect(urlEntry.Text, p12Entry.Text, passEntry.Text)
+			conn, err = connect(urlField.Text, usernameField.Text, passEntry.Text)
 			if err != nil {
 				statusLabel.SetText(fmt.Sprintf("Connection failed: %v", err))
 			} else {
 				statusLabel.SetText("Connected successfully")
-				ackBtn.Enable()
-				releaseBtn.Enable()
 			}
 		}()
 	})
@@ -115,59 +128,42 @@ func main() {
 			statusLabel.SetText("Not connected")
 			return
 		}
-		num, err := strconv.Atoi(numEntry.Text)
+		nbMsg, err := strconv.Atoi(nbMsgField.Text)
 		if err != nil {
 			statusLabel.SetText("Invalid number")
 			return
 		}
 		go func() {
-			sess, err := conn.NewSession(context.Background(), nil)
+			lines, err := retrieveMessages(context.Background(), conn, queueNameField.Text, nbMsg)
 			if err != nil {
-				statusLabel.SetText(fmt.Sprintf("Session error: %v", err))
+				statusLabel.SetText(fmt.Sprintf("Retrieve failed: %v", err))
 				return
 			}
-			r, err := sess.NewReceiver(
-				amqp.LinkSourceAddress(queueEntry.Text),
-				amqp.LinkCredit(uint32(num)),
-			)
-			if err != nil {
-				statusLabel.SetText(fmt.Sprintf("Receiver error: %v", err))
-				return
+			for _, line := range lines {
+				data.Append(line)
 			}
-			var lines []string
-			for i := 0; i < num; i++ {
-				msg, err := r.Receive(context.Background(), nil)
-				if err != nil {
-					statusLabel.SetText(fmt.Sprintf("Receive failed: %v", err))
-					break
-				}
-				retrievedMsgs = append(retrievedMsgs, msg)
-				lines = append(lines, string(msg.GetData()[0]))
-			}
-			msgDisplay.SetText(strings.Join(lines, "\n"))
 		}()
 	})
 
-	form := container.NewVBox(
+	mainView := container.NewVBox(
 		widget.NewForm(
-			widget.NewFormItem("AMQPS URL", urlEntry),
-			widget.NewFormItem("P12 Path", p12Entry),
-			widget.NewFormItem("P12 Password", passEntry),
+			widget.NewFormItem("AMQPS URL", urlField),
+			widget.NewFormItem("Username", usernameField),
+			widget.NewFormItem("Password", passEntry),
 		),
 		connectBtn,
 		statusLabel,
 		widget.NewForm(
-			widget.NewFormItem("Queue", queueEntry),
-			widget.NewFormItem("Count", numEntry),
+			widget.NewFormItem("Queue", queueNameField),
+			widget.NewFormItem("Count", nbMsgField),
 		),
 		retrieveBtn,
-		ackBtn,
-		releaseBtn,
-		msgDisplay,
+		msgList,
 	)
 
-	w.SetContent(form)
-	w.Resize(fyne.NewSize(400, 400))
+	leftMenu := container.NewVBox(canvas.NewText("Left Menu", color.White))
+	content := container.NewBorder(topBar(), nil, leftMenu, nil, mainView)
+	w.SetContent(content)
 
 	w.ShowAndRun()
 }
