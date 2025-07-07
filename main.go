@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"strconv"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -17,9 +18,11 @@ import (
 	"github.com/Azure/go-amqp"
 )
 
-var conn *amqp.Conn
-var retrievedMsgs []*amqp.Message
-var receiver *amqp.Receiver
+var (
+	conn     *amqp.Conn
+	receiver *amqp.Receiver
+	mu       sync.RWMutex
+)
 
 func connect(url, username, password string) (*amqp.Conn, error) {
 	conn, err := amqp.Dial(context.Background(), url, &amqp.ConnOptions{
@@ -36,11 +39,17 @@ func retrieveMessages(ctx context.Context, conn *amqp.Conn, queueName string, nb
 	if err != nil {
 		return nil, fmt.Errorf("session error: %v", err)
 	}
-	if receiver != nil {
-		receiver.Close(ctx)
-	}
 
-	receiver, err = sess.NewReceiver(
+	mu.Lock()
+	if receiver != nil {
+		err := receiver.Close(ctx)
+		if err != nil {
+			fmt.Println("Error closing receiver:", err)
+		}
+	}
+	mu.Unlock()
+
+	newReceiver, err := sess.NewReceiver(
 		ctx,
 		queueName,
 		&amqp.ReceiverOptions{
@@ -53,21 +62,42 @@ func retrieveMessages(ctx context.Context, conn *amqp.Conn, queueName string, nb
 	if err != nil {
 		return nil, fmt.Errorf("receiver error: %v", err)
 	}
+
+	mu.Lock()
+	receiver = newReceiver
+	mu.Unlock()
+
 	var lines []string
 	for i := 0; i < nbMsg; i++ {
-		msg, err := receiver.Receive(ctx, nil)
+		msg, err := newReceiver.Receive(ctx, nil)
 		if err != nil {
 			return nil, fmt.Errorf("receive failed: %v", err)
 		}
 
-		var mappedMsg map[string]any
-		_ = json.Unmarshal(msg.GetData(), &mappedMsg)
-		jsonIndent, _ := json.MarshalIndent(mappedMsg, "", "\t")
-		_ = receiver.ReleaseMessage(ctx, msg)
-		retrievedMsgs = append(retrievedMsgs, msg)
-		lines = append(lines, string(jsonIndent))
+		json, err := toJson(msg)
+		if err != nil {
+			return nil, fmt.Errorf("toJson failed: %v", err)
+		}
+		lines = append(lines, json)
+		err = newReceiver.ReleaseMessage(ctx, msg)
+		if err != nil {
+			return nil, fmt.Errorf("release failed: %v", err)
+		}
 	}
 	return lines, nil
+}
+
+func toJson(msg *amqp.Message) (string, error) {
+	var mappedMsg map[string]any
+	err := json.Unmarshal(msg.GetData(), &mappedMsg)
+	if err != nil {
+		return "", fmt.Errorf("unmarshal failed: %v", err)
+	}
+	jsonIndent, err := json.MarshalIndent(mappedMsg, "", "\t")
+	if err != nil {
+		return "", fmt.Errorf("marshal failed: %v", err)
+	}
+	return string(jsonIndent), nil
 }
 
 func createInputField(placeholder, text string) *widget.Entry {
@@ -93,10 +123,12 @@ func main() {
 
 	urlField := createInputField("amqps://hostname", "amqp://localhost:5672")
 	usernameField := createInputField("username", "user")
-	passEntry := createInputField("password", "user")
 	statusLabel := widget.NewLabel("")
 	queueNameField := createInputField("queue name", "my_queue")
 	nbMsgField := createInputField("count", "10")
+	passwordField := widget.NewPasswordEntry()
+	passwordField.SetPlaceHolder("password")
+	passwordField.SetText("user")
 
 	data := binding.BindStringList(
 		&[]string{},
@@ -114,18 +146,29 @@ func main() {
 		statusLabel.SetText("Connecting...")
 		go func() {
 			var err error
-			conn, err = connect(urlField.Text, usernameField.Text, passEntry.Text)
+			newConn, err := connect(urlField.Text, usernameField.Text, passwordField.Text)
 			if err != nil {
 				statusLabel.SetText(fmt.Sprintf("Connection failed: %v", err))
 			} else {
+				mu.Lock()
+				conn = newConn
+				mu.Unlock()
 				statusLabel.SetText("Connected successfully")
 			}
 		}()
 	})
 
 	retrieveBtn := widget.NewButton("Retrieve", func() {
-		if conn == nil {
+		mu.RLock()
+		currentConn := conn
+		mu.RUnlock()
+
+		if currentConn == nil {
 			statusLabel.SetText("Not connected")
+			return
+		}
+		if queueNameField.Text == "" {
+			statusLabel.SetText("Queue name is required")
 			return
 		}
 		nbMsg, err := strconv.Atoi(nbMsgField.Text)
@@ -134,7 +177,7 @@ func main() {
 			return
 		}
 		go func() {
-			lines, err := retrieveMessages(context.Background(), conn, queueNameField.Text, nbMsg)
+			lines, err := retrieveMessages(context.Background(), currentConn, queueNameField.Text, nbMsg)
 			if err != nil {
 				statusLabel.SetText(fmt.Sprintf("Retrieve failed: %v", err))
 				return
@@ -149,7 +192,7 @@ func main() {
 		widget.NewForm(
 			widget.NewFormItem("AMQPS URL", urlField),
 			widget.NewFormItem("Username", usernameField),
-			widget.NewFormItem("Password", passEntry),
+			widget.NewFormItem("Password", passwordField),
 		),
 		connectBtn,
 		statusLabel,
@@ -164,6 +207,21 @@ func main() {
 	leftMenu := container.NewVBox(canvas.NewText("Left Menu", color.White))
 	content := container.NewBorder(topBar(), nil, leftMenu, nil, mainView)
 	w.SetContent(content)
+
+	// Cleanup function to close connections when window is closed
+	w.SetOnClosed(func() {
+		mu.Lock()
+		if receiver != nil {
+			err := receiver.Close(context.Background())
+			if err != nil {
+				fmt.Println("Error closing receiver:", err)
+			}
+		}
+		if conn != nil {
+			conn.Close()
+		}
+		mu.Unlock()
+	})
 
 	w.ShowAndRun()
 }
