@@ -8,6 +8,9 @@ This application provides a small graphical interface for connecting to an AMQPS
 - "Connect" button that attempts an mTLS connection using the `go-amqp` library
 - Connection result is displayed inside the window
 - The `.p12` file is converted to PEM at runtime to load the certificate chain
+- Fields to provide a queue name and number of messages to fetch
+- "Retrieve" button fetches messages without acknowledging them
+- Buttons to acknowledge or release all fetched messages
 
 ## Building
 
